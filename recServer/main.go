@@ -39,10 +39,15 @@ func main() {
 		recommender := c.Query("recommender")
 
 		query := `
-			SELECT b.title, b.author, b.genre, r.name
-			FROM books b
-			JOIN recommendations rec ON b.id = rec.book_id
-			JOIN recommenders r ON rec.recommender_id = r.id
+		SELECT 
+		b.title, 
+		b.author, 
+		b.genre, 
+		STRING_AGG(r.name, ', ') AS recommenders
+		FROM books b
+		JOIN recommendations rec ON b.id = rec.book_id
+		JOIN recommenders r ON rec.recommender_id = r.id
+		GROUP BY b.id, b.title, b.author, b.genre;
 		`
 		args := []interface{}{}
 
