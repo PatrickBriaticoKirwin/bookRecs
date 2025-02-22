@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-contrib/cors"
@@ -47,7 +48,6 @@ func main() {
 		FROM books b
 		JOIN recommendations rec ON b.id = rec.book_id
 		JOIN recommenders r ON rec.recommender_id = r.id
-		GROUP BY b.id, b.title, b.author, b.genre;
 		`
 		args := []interface{}{}
 
@@ -55,13 +55,11 @@ func main() {
 			query += " WHERE r.name = $1"
 			args = append(args, recommender)
 		}
+		query += "GROUP BY b.id, b.title, b.author, b.genre;"
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to query books",
-				"details": err,Error(),
-			})
+			c.JSON(http.StatusInternalServerError, gin.H{ "error": fmt.Sprintf("Failed to query books: %v", err)})
 			return
 		}
 		defer rows.Close()
