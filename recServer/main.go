@@ -58,7 +58,10 @@ func main() {
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query books"})
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to query books",
+				"details": err,Error(),
+			})
 			return
 		}
 		defer rows.Close()
