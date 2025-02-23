@@ -28,7 +28,7 @@ func main() {
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"https://patrickbriaticokirwin.github.io"}, // Allow GitHub Pages frontend
+		AllowOrigins:     []string{"https://patrickbriaticokirwin.github.io", "http://localhost:8000"}, // Allow GitHub Pages frontend
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type"},
 		ExposeHeaders:    []string{"Content-Length"},
