@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"fmt"
@@ -232,7 +234,7 @@ type Book struct {
 	Genre         string `json:"genre"`
 }
 
-func ScrapeGoodreads(url) {
+func ScrapeGoodreads(goodReadsUrl string) []Book {
 	c := colly.NewCollector()
 	var books []Book
 
@@ -247,12 +249,11 @@ func ScrapeGoodreads(url) {
 			Title:    title,
 			Author:   author,
 			ISBN:     isbn,
-			PublishedDate: publishedDate
-			Genre: "Unknown"
-		})
+			PublishedDate: publishedDate,
+			Genre: "Unknown"})
 	})
 
-	err := c.Visit(url)
+	err := c.Visit(goodReadsUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
