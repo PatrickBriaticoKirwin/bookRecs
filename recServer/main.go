@@ -5,14 +5,21 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-contrib/cors"
+	"github.com/gocolly/colly"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+
+type ImportRequest struct {
+	GoodreadsURL    string `json:"url"`
+	RecommenderName string `json:"name"`
+}
 
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -122,11 +129,203 @@ func main() {
 				"title":  title,
 				"author": author,
 				"genre":  genre,
+				"recommender": recommender,
 			})
 		}
 		c.JSON(http.StatusOK, books)
 	})
+	r.POST("/import-request", func(c *gin.Context) {
+		var req ImportRequest
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+		if !strings.Contains(req.GoodreadsURL, "goodreads.com") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Request URL must be from goodreads"})
+			return	
+		}
+
+
+		_, err := db.Exec(
+			"INSERT INTO book_import_requests (recommender_name, goodreads_url) VALUES ($1, $2)",
+			req.RecommenderName, req.GoodreadsURL,
+		)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store request"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Request submitted for approval"})
+	})
+
+	r.POST("/approve-import/{id}", func(c *gin.Context) {
+		requestID := c.Param("id")
+
+		// Get request details
+		var req struct {
+			RecommenderName string
+			GoodreadsURL    string
+		}
+		err := db.QueryRow(
+			"SELECT recommender_name, goodreads_url FROM book_import_requests WHERE id = $1 AND status = 'pending'",
+			requestID,
+		).Scan(&req.RecommenderName, &req.GoodreadsURL)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
+			return
+		}
+
+		// Ensure recommender exists
+		var recommenderID int
+		err = db.QueryRow("SELECT id FROM recommenders WHERE name = $1", req.RecommenderName).Scan(&recommenderID)
+		if err == sql.ErrNoRows {
+			err = db.QueryRow("INSERT INTO recommenders (name) VALUES ($1) RETURNING id", req.RecommenderName).Scan(&recommenderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create recommender"})
+				return
+			}
+		}
+
+		// Scrape Goodreads & Insert books (placeholder function)
+		books := ScrapeGoodreads(req.GoodreadsURL)
+		for _, book := range books {
+			var bookID int
+			err = db.QueryRow("SELECT id FROM books WHERE title = $1 AND author = $2", book.Title, book.Author).Scan(&bookID)
+			if err == sql.ErrNoRows {
+				err = db.QueryRow("INSERT INTO books (title, author, genre) VALUES ($1, $2, $3) RETURNING id",
+				book.Title, book.Author, book.Genre).Scan(&bookID)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert book"})
+					return
+				}
+			}
+
+			_, err = db.Exec("INSERT INTO recommendations (book_id, recommender_id) VALUES ($1, $2)", bookID, recommenderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to insert recommendation"})
+				return
+			}
+		}
+
+		// Update request status
+		_, err = db.Exec("UPDATE book_import_requests SET status = 'approved' WHERE id = $1", requestID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update request status"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Books imported successfully"})
+	})
+
 
 	r.Run(":8080") // Start server
+}
+
+
+type Book struct {
+	Title         string `json:"title"`
+	Author        string `json:"author"`
+	ISBN          string `json:"isbn"`
+	PublishedDate string `json:"published_date"`
+	Genre         string `json:"genre"`
+}
+
+func ScrapeGoodreads(url) {
+	c := colly.NewCollector()
+	var books []Book
+
+	c.OnHTML("tr.bookalike.review", func(e *colly.HTMLElement) {
+		title := e.ChildText("td.field.title a")
+		author := e.ChildText("td.field.author a")
+		isbn := e.ChildText("td.field.isbn .value")
+		publishedDate := e.ChildText("td.field.date_pub div.value")
+
+
+		books = append(books, Book{
+			Title:    title,
+			Author:   author,
+			ISBN:     isbn,
+			PublishedDate: publishedDate
+			Genre: "Unknown"
+		})
+	})
+
+	err := c.Visit(url)
+	if err != nil {
+		log.Fatal(err)
+	}
+	books = GetGenres(books)
+	return books;
+}
+
+func GetGenres(books []Book) []Book {
+	normalizeTitle := func(title string) string {
+		return strings.TrimSpace(strings.ToLower(title))
+	}
+
+	isMatchingTitle := func(requested, retrieved string) bool {
+		reqNorm := normalizeTitle(requested)
+		retNorm := normalizeTitle(retrieved)
+		return strings.Contains(reqNorm, retNorm) || strings.Contains(retNorm, reqNorm)
+	}
+
+	for i := range books {
+		baseURL := "https://www.googleapis.com/books/v1/volumes"
+		query := url.QueryEscape(books[i].Title + " " + books[i].Author)
+		apiURL := fmt.Sprintf("%s?q=%s", baseURL, query)
+
+		resp, err := http.Get(apiURL)
+		if err != nil {
+			fmt.Printf("Error fetching data for %s: %v\n", books[i].Title, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("API returned status %d for %s\n", resp.StatusCode, books[i].Title)
+			continue
+		}
+
+		var result struct {
+			Items []struct {
+				VolumeInfo struct {
+					Title      string   `json:"title"`
+					Authors    []string `json:"authors"`
+					Categories []string `json:"categories"`
+				} `json:"volumeInfo"`
+			} `json:"items"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			fmt.Printf("Error decoding JSON for %s: %v\n", books[i].Title, err)
+			continue
+		}
+
+		if len(result.Items) == 0 {
+			fmt.Printf("No matching books found for %s\n", books[i].Title)
+			continue
+		}
+
+		volume := result.Items[0].VolumeInfo
+
+		if !isMatchingTitle(books[i].Title, volume.Title) {
+			fmt.Printf("Mismatch: requested '%s', got '%s'\n", books[i].Title, volume.Title)
+			continue
+		}
+
+		if len(volume.Categories) > 0 {
+			books[i].Genre = volume.Categories[0]
+		} else {
+			books[i].Genre = "Unknown"
+		}
+
+		fmt.Printf("Updated: %s -> Genre: %s\n", books[i].Title, books[i].Genre)
+
+		time.Sleep(1 * time.Second) // Sleep to avoid rate limiting
+	}
+
+	return books
 }
 
